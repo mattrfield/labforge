@@ -48,6 +48,8 @@ Flags are generated fresh on every start as `LF{<32 hex>}`. They're written into
 - Pushing changes under `labs/` to `main` runs `.github/workflows/labs.yml`. It runs `scripts/build_lab_packs.py` to build one `<id>-<version>.tar.gz` per free lab plus `index.json` (URLs and SHA-256 hashes), signs the index with the same key as launcher updates, and uploads everything to the rolling `labs` prerelease.
 - In the app, **Labs → Check for new labs** (also run at start) fetches the index, verifies its signature, and lists new and updated labs. Packs are checked against the signed hash, unpacked only if every path stays inside the lab's folder (no links or special files, size and file-count capped), validated, then swapped into `<app data>/labs/`. Newer installed labs override bundled ones; the learner's progress is never touched. A lab that is currently active can't be updated until it's destroyed.
 
+
+**Pro labs (in progress).** Labs with `tier: pro` are never published to GitHub. They download from a license server after the learner activates a key under **System → LabForge Pro**; the launcher keeps a signed, expiring token and renews it quietly. Installed labs keep working without it. This is wired up end to end against a stub in [`license-server/`](license-server/README.md); in released builds the feature stays hidden until a real server URL and key are set in `src-tauri/src/license.rs`.
 Set `LABFORGE_INDEX_URL` to point the launcher at a different index (it must still be signed by the launcher's key). To try the pipeline locally, build the packs with `--base-url http://127.0.0.1:8098`, sign `index.json` with `cargo tauri signer sign`, serve the folder, and run `cargo test --lib live -- --ignored` with `LABFORGE_TEST_INDEX_URL` and `LABFORGE_TEST_PUBKEY` set.
 
 ## MVP status
@@ -70,5 +72,5 @@ cd src-tauri && cargo test --lib e2e -- --ignored --nocapture --test-threads=1
 ```
 - WireGuard gateway, so a separate attack VM can join the lab network (today: attack from the host, which routes to the lab subnet directly on Linux)
 - Prebuilt, signed lab images pulled from a registry instead of local builds
-- License-gated pro labs (the index already has a `tier` field; pro entries are shown locked and can't be installed yet)
+- A real license server: the stub in `license-server/` still needs a Gumroad key check, HTTPS hosting and a production signing key
 - Splitting the orchestrator into a separate daemon with a privileged helper (it currently runs inside the app process)

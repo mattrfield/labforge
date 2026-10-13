@@ -3,7 +3,7 @@
 
     python scripts/build_lab_packs.py --out dist-labs --base-url https://.../releases/download/labs
 
-For every `labs/<id>/lab.yaml` of the free tier this writes `<id>-<version>.tar.gz` (one top-level
+For every `labs/<id>/lab.yaml` of the free tier (or `--tier pro`) this writes `<id>-<version>.tar.gz` (one top-level
 `<id>/` folder, reproducible bytes) and a single `index.json` listing each pack's URL, size and
 SHA-256. The index is signed separately (see .github/workflows/labs.yml). Standard library only.
 """
@@ -62,6 +62,7 @@ def main() -> int:
     ap.add_argument("--out", default="dist-labs")
     ap.add_argument("--base-url", required=True, help="where the packs will be downloadable from")
     ap.add_argument("--labs-dir", default=str(ROOT / "labs"))
+    ap.add_argument("--tier", default="free", help="only pack labs of this tier (free is public; pro goes to the license server)")
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -75,8 +76,8 @@ def main() -> int:
             sys.exit(f"{lab_yaml}: id `{lab_id}` must match the folder name")
         if not SEMVER.match(version):
             sys.exit(f"{lab_yaml}: version `{version}` must look like 1.2.0")
-        if tier != "free":
-            print(f"skip {lab_id}: tier {tier} is not published to the public index")
+        if tier != args.tier:
+            print(f"skip {lab_id}: tier {tier}, building {args.tier}")
             continue
         data = build_pack(lab_yaml.parent, lab_id)
         name = f"{lab_id}-{version}.tar.gz"

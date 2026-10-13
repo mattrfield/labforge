@@ -26,6 +26,9 @@ const mock = (() => {
     return { level, title: titles.find(([max]) => level <= max)[1], xp, level_floor: need(level), next_level_xp: need(level + 1) };
   };
 
+  let lic = null; // mock license; add ?pro to the URL to make licensing available
+  const licenseView = () => ({ available: location.search.includes("pro"), state: lic ? "active" : "none", expires_at: lic?.expires_at ?? null, key_hint: lic ? "…" + lic.key.slice(-4) : null });
+
   const labs = [
     {
       id: "bean-there", name: "Bean There", track: "web", track_name: "Web",
@@ -65,8 +68,15 @@ const mock = (() => {
   }
 
   const handlers = {
-    check_lab_updates: () => (location.search.includes("labs") ? [{ id: "tidewater", name: "Tidewater", version: "1.0.0", installed_version: null, tier: "free", size: 48200, blurb: "A harbour-master portal with a leaky API.", locked: false, blocked: null }, { id: "bean-there", name: "Bean There", version: "1.1.0", installed_version: "1.0.0", tier: "free", size: 12100, blurb: "", locked: false, blocked: null }, { id: "deep-vault", name: "Deep Vault", version: "1.0.0", installed_version: null, tier: "pro", size: 90000, blurb: "", locked: true, blocked: null }] : []),
+    check_lab_updates: () => (location.search.includes("labs") ? [{ id: "tidewater", name: "Tidewater", version: "1.0.0", installed_version: null, tier: "free", size: 48200, blurb: "A harbour-master portal with a leaky API.", locked: false, blocked: null }, { id: "bean-there", name: "Bean There", version: "1.1.0", installed_version: "1.0.0", tier: "free", size: 12100, blurb: "", locked: false, blocked: null }, { id: "deep-vault", name: "Deep Vault", version: "1.0.0", installed_version: null, tier: "pro", size: 90000, blurb: "", locked: !lic, blocked: null }] : []),
     install_labs: ({ ids }) => ({ installed: ids, failed: [] }),
+    get_license: () => licenseView(),
+    activate_license: ({ key }) => {
+      if (!key.startsWith("LF-TEST-")) throw new Error("That license key wasn't found.");
+      lic = { key, expires_at: Math.floor(Date.now() / 1000) + 30 * 86400 };
+      return licenseView();
+    },
+    deactivate_license: () => { lic = null; return licenseView(); },
     app_info: () => ({ version: "0.1.0" }),
     check_update: () => (location.search.includes("update") ? { version: "0.2.0", notes: null } : null),
     install_update: () => { throw new Error("Updates only work in the desktop app."); },

@@ -3,3 +3,7 @@
 *.log
 .DS_Store
 /.claude/
+/license-server/target/
+/license-server/dev-keys/
+/dist-pro/
+/dist-labs/

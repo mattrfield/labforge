@@ -1,0 +1,31 @@
+# A tiny pro lab used to exercise licensing end to end. It is NOT part of the shipped labs.
+id: demo-pro
+name: Demo Pro Lab
+version: 1.0.0
+tier: pro
+track: linux
+blurb: A placeholder pro lab for testing license-gated installs.
+story: >
+  Nothing to hack here yet. This lab exists so the launcher's license flow can be tested
+  without publishing real pro content.
+skills: [enumeration]
+xp: 50
+est_minutes: 5
+difficulties: [easy]
+difficulty_notes:
+  easy: Just find the flag.
+resources: { ram_mb: 64, cpus: 0.25, disk_mb: 10 }
+subnet_octet: 90
+hosts:
+  - name: box01
+    service: box
+    os: Alpine Linux
+flags:
+  - id: root
+    label: Root flag
+    host: box01
+    path: /root/flag.txt
+    xp_share: 1.0
+hints:
+  - text: The flag is in the root user's home directory.
+    cost: 0.1

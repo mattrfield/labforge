@@ -1,0 +1,25 @@
+# Variables (IP_BOX01, LAB_SUBNET, DIFFICULTY, ...) are supplied by the launcher.
+services:
+  box:
+    image: alpine:3.20
+    hostname: box01
+    command: ["sleep", "infinity"]
+    networks:
+      lab:
+        ipv4_address: ${IP_BOX01:-10.66.90.10}
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    mem_limit: 64m
+    cpus: 0.25
+
+networks:
+  lab:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${LAB_SUBNET:-10.66.90.0/24}
+          gateway: ${LAB_GATEWAY:-10.66.90.1}

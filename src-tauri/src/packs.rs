@@ -98,19 +98,29 @@ fn check_url(url: &str) -> Result<(), String> {
 }
 
 pub async fn fetch_limited(url: &str, max: u64) -> Result<Vec<u8>, String> {
+    fetch_with(url, max, &[]).await.map(|(body, _)| body)
+}
+
+/// Like `fetch_limited`, with extra request headers; also returns the `X-Signature` response header.
+pub async fn fetch_with(url: &str, max: u64, headers: &[(String, String)]) -> Result<(Vec<u8>, Option<String>), String> {
     check_url(url)?;
     let client = reqwest::Client::builder()
         .user_agent(concat!("LabForge/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;
-    let mut resp = client.get(url).send().await.map_err(|e| format!("couldn't reach {url}: {e}"))?;
+    let mut req = client.get(url);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    let mut resp = req.send().await.map_err(|e| format!("couldn't reach {url}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("{url} returned {}", resp.status()));
     }
     if resp.content_length().is_some_and(|n| n > max) {
         return Err(format!("{url} is larger than the {} MB limit", max / 1024 / 1024));
     }
+    let signature = resp.headers().get("x-signature").and_then(|v| v.to_str().ok()).map(String::from);
     let mut out = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
         out.extend_from_slice(&chunk);
@@ -118,7 +128,7 @@ pub async fn fetch_limited(url: &str, max: u64) -> Result<Vec<u8>, String> {
             return Err(format!("{url} is larger than the {} MB limit", max / 1024 / 1024));
         }
     }
-    Ok(out)
+    Ok((out, signature))
 }
 
 pub async fn fetch_index(index_url: &str, pubkey_b64: &str) -> Result<Index, String> {
@@ -128,14 +138,21 @@ pub async fn fetch_index(index_url: &str, pubkey_b64: &str) -> Result<Index, Str
     parse_index(pubkey_b64, &body, &sig)
 }
 
-pub async fn fetch_pack(entry: &IndexEntry) -> Result<Vec<u8>, String> {
-    fetch_limited(&entry.url, entry.size.min(MAX_PACK_BYTES)).await
+pub async fn fetch_pack(entry: &IndexEntry, headers: &[(String, String)]) -> Result<Vec<u8>, String> {
+    fetch_with(&entry.url, MAX_PACK_BYTES.min(entry.size.max(1)), headers).await.map(|(body, _)| body)
+}
+
+/// Fetches a signed index whose signature comes back in the `X-Signature` header (the pro index).
+pub async fn fetch_signed_index(url: &str, pubkey_b64: &str, headers: &[(String, String)]) -> Result<Index, String> {
+    let (body, sig) = fetch_with(url, MAX_INDEX_BYTES, headers).await?;
+    let sig = sig.ok_or("The license server didn't sign the pro index.")?;
+    parse_index(pubkey_b64, &body, &sig)
 }
 
 // ------------------------------------------------------------- offers ----
 
 /// What the index offers that the learner doesn't already have at that version or newer.
-pub fn offers(index: &Index, catalog: &Catalog, app_version: &str) -> Vec<Offer> {
+pub fn offers(index: &Index, catalog: &Catalog, app_version: &str, licensed: bool) -> Vec<Offer> {
     let app = semver::Version::parse(app_version).ok();
     let mut out = Vec::new();
     for e in &index.labs {
@@ -156,7 +173,7 @@ pub fn offers(index: &Index, catalog: &Catalog, app_version: &str) -> Vec<Offer>
             tier: e.tier,
             size: e.size,
             blurb: e.blurb.clone(),
-            locked: e.tier == Tier::Pro,
+            locked: e.tier == Tier::Pro && !licensed,
             blocked,
         });
     }
@@ -232,6 +249,9 @@ fn check_staged(dir: &Path, entry: &IndexEntry, app_version: &str) -> Result<(),
     if !problems.is_empty() {
         return Err(format!("lab.yaml: {}", problems.join("; ")));
     }
+    if manifest.tier != entry.tier {
+        return Err(format!("the pack's tier ({:?}) doesn't match the index ({:?})", manifest.tier, entry.tier));
+    }
     if manifest.id != entry.id || manifest.version != entry.version {
         return Err(format!(
             "the pack contains {} {} but the index promised {} {}",
@@ -250,9 +270,9 @@ fn check_staged(dir: &Path, entry: &IndexEntry, app_version: &str) -> Result<(),
 }
 
 /// Verifies, unpacks and installs one pack into `<installed_root>/<id>`, replacing any older copy.
-pub fn install(entry: &IndexEntry, data: &[u8], installed_root: &Path, app_version: &str) -> Result<(), String> {
-    if entry.tier == Tier::Pro {
-        return Err("Pro labs need a license, which isn't available yet.".into());
+pub fn install(entry: &IndexEntry, data: &[u8], installed_root: &Path, app_version: &str, allow_pro: bool) -> Result<(), String> {
+    if entry.tier == Tier::Pro && !allow_pro {
+        return Err("Pro labs need an active license.".into());
     }
     let valid_id = !entry.id.is_empty() && entry.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if !valid_id {
@@ -358,11 +378,11 @@ mod tests {
     fn installs_a_good_pack_and_replaces_older_copies() {
         let root = tmp("install");
         let data = good_pack();
-        install(&entry_for(&data), &data, &root, "0.1.1").unwrap();
+        install(&entry_for(&data), &data, &root, "0.1.1", false).unwrap();
         assert!(root.join("demo/lab.yaml").is_file());
         assert!(root.join("demo/app/run.sh").is_file());
         fs::write(root.join("demo/stale.txt"), "old").unwrap();
-        install(&entry_for(&data), &data, &root, "0.1.1").unwrap();
+        install(&entry_for(&data), &data, &root, "0.1.1", false).unwrap();
         assert!(!root.join("demo/stale.txt").exists(), "reinstall must replace the folder");
         let leftovers: Vec<_> = fs::read_dir(&root).unwrap().filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().to_string()).collect();
         assert_eq!(leftovers, vec!["demo"], "no staging or backup folders left");
@@ -375,7 +395,7 @@ mod tests {
         let data = good_pack();
         let mut e = entry_for(&data);
         e.sha256 = "00".repeat(32);
-        let err = install(&e, &data, &root, "0.1.1").unwrap_err();
+        let err = install(&e, &data, &root, "0.1.1", false).unwrap_err();
         assert!(err.contains("checksum"), "{err}");
         assert!(!root.join("demo").exists());
         let _ = fs::remove_dir_all(&root);
@@ -386,7 +406,7 @@ mod tests {
         for bad in ["demo/../../evil.txt", "/etc/passwd", "other/lab.yaml"] {
             let root = tmp("trav");
             let data = pack(&[(bad, b"x"), ("demo/lab.yaml", MANIFEST.as_bytes())]);
-            let err = install(&entry_for(&data), &data, &root, "0.1.1").unwrap_err();
+            let err = install(&entry_for(&data), &data, &root, "0.1.1", false).unwrap_err();
             assert!(err.contains("outside") || err.contains("unsafe"), "{bad}: {err}");
             assert!(!root.parent().unwrap().join("evil.txt").exists());
             let _ = fs::remove_dir_all(&root);
@@ -411,7 +431,7 @@ mod tests {
         gz.write_all(&tar_bytes).unwrap();
         let data = gz.finish().unwrap();
         let root = tmp("link");
-        let err = install(&entry_for(&data), &data, &root, "0.1.1").unwrap_err();
+        let err = install(&entry_for(&data), &data, &root, "0.1.1", false).unwrap_err();
         assert!(err.contains("link"), "{err}");
         let _ = fs::remove_dir_all(&root);
     }
@@ -422,10 +442,10 @@ mod tests {
         let data = good_pack();
         let mut e = entry_for(&data);
         e.version = "9.9.9".into();
-        assert!(install(&e, &data, &root, "0.1.1").unwrap_err().contains("promised"));
+        assert!(install(&e, &data, &root, "0.1.1", false).unwrap_err().contains("promised"));
         let with_min = MANIFEST.replace("track: web", "track: web\nmin_app_version: 2.0.0");
         let data = pack(&[("demo/lab.yaml", with_min.as_bytes()), ("demo/compose.yaml", b"x")]);
-        assert!(install(&entry_for(&data), &data, &root, "0.1.1").unwrap_err().contains("2.0.0"));
+        assert!(install(&entry_for(&data), &data, &root, "0.1.1", false).unwrap_err().contains("2.0.0"));
         assert!(!root.join("demo").exists());
         let _ = fs::remove_dir_all(&root);
     }
@@ -436,7 +456,17 @@ mod tests {
         let data = good_pack();
         let mut e = entry_for(&data);
         e.tier = Tier::Pro;
-        assert!(install(&e, &data, &root, "0.1.1").unwrap_err().contains("license"));
+        assert!(install(&e, &data, &root, "0.1.1", false).unwrap_err().contains("license"));
+        // with a license the pack must really be a pro pack
+        assert!(install(&e, &data, &root, "0.1.1", true).unwrap_err().contains("tier"));
+        let pro = MANIFEST.replace("track: web", "track: web
+tier: pro");
+        let data = pack(&[("demo/lab.yaml", pro.as_bytes()), ("demo/compose.yaml", b"services: {}
+")]);
+        let mut e = entry_for(&data);
+        e.tier = Tier::Pro;
+        install(&e, &data, &root, "0.1.1", true).unwrap();
+        assert!(root.join("demo/lab.yaml").is_file());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -452,7 +482,7 @@ mod tests {
     fn offers_new_and_newer_labs_only() {
         let root = tmp("offers");
         let data = good_pack();
-        install(&entry_for(&data), &data, &root, "0.1.1").unwrap();
+        install(&entry_for(&data), &data, &root, "0.1.1", false).unwrap();
         let catalog = crate::catalog::Catalog::load_roots(&tmp("none"), &root, "0.1.1");
         assert_eq!(catalog.labs.len(), 1, "{:?}", catalog.errors);
         let mk = |id: &str, v: &str, min: Option<&str>| IndexEntry {
@@ -462,7 +492,7 @@ mod tests {
             ..entry_for(&data)
         };
         let index = Index { schema: 1, labs: vec![mk("demo", "1.2.0", None), mk("demo", "1.3.0", None), mk("fresh", "1.0.0", Some("5.0.0"))] };
-        let o = offers(&index, &catalog, "0.1.1");
+        let o = offers(&index, &catalog, "0.1.1", false);
         assert_eq!(o.len(), 2);
         assert_eq!((o[0].id.as_str(), o[0].installed_version.as_deref()), ("demo", Some("1.2.0")));
         assert!(o[1].blocked.as_deref().unwrap().contains("5.0.0"));
@@ -523,8 +553,8 @@ mod live {
         assert!(!index.labs.is_empty());
         let root = std::env::temp_dir().join(format!("labforge-live-{:08x}", rand::random::<u32>()));
         for e in &index.labs {
-            let data = fetch_pack(e).await.unwrap();
-            install(e, &data, &root, "0.1.1").unwrap();
+            let data = fetch_pack(e, &[]).await.unwrap();
+            install(e, &data, &root, "0.1.1", false).unwrap();
         }
         let empty = root.join("empty-bundled");
         fs::create_dir_all(&empty).unwrap();

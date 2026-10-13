@@ -53,6 +53,8 @@ const S = {
   labOffers: null,
   labState: "idle",
   labMsg: "",
+  license: { available: false, state: "none", expires_at: null, key_hint: null },
+  licenseBusy: false,
 };
 
 const lab = (id) => S.labs.find((l) => l.id === id);
@@ -100,7 +102,7 @@ async function boot() {
   runPreflight();
   call("app_info").then((i) => { S.version = i.version; if (S.view === "system") render(); });
   checkUpdate();
-  checkLabUpdates();
+  call("get_license").then((l) => { S.license = l; if (S.view === "system") render(); checkLabUpdates(); });
 }
 
 function setCatalogue(c) {
@@ -228,7 +230,7 @@ function labOffersPanel() {
     .map((o) => {
       const what = o.installed_version ? `Update ${esc(o.installed_version)} → ${esc(o.version)}` : `New · v${esc(o.version)}`;
       const action = o.locked
-        ? `<span class="faint">Pro</span>`
+        ? `<button class="btn small" data-view="system">${S.license.state === "expired" ? "Renew license" : "Unlock with a license"}</button>`
         : o.blocked
           ? `<span class="faint">${esc(o.blocked)}</span>`
           : `<button class="btn small" data-action="install-lab" data-id="${esc(o.id)}" ${busy ? "disabled" : ""}>Install</button>`;
@@ -237,6 +239,25 @@ function labOffersPanel() {
     .join("");
   return `<div class="panel" style="margin-bottom:20px"><div class="section-title"><h2>${offers.length} lab${offers.length === 1 ? "" : "s"} available</h2>
       ${installable.length > 1 ? `<button class="btn small primary" data-action="install-all-labs" ${busy ? "disabled" : ""}>${S.labState === "installing" ? "Installing…" : "Install all"}</button>` : ""}</div>${rows}</div>`;
+}
+
+// ------------------------------------------------------------ license ----
+
+const fmtDate = (secs) => new Date(secs * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+
+function licensePanel() {
+  const l = S.license;
+  if (!l.available) return "";
+  const active = l.state === "active";
+  const body = active
+    ? `<p><strong>Pro is active.</strong> <span class="muted">Key ${esc(l.key_hint ?? "")}. Renews automatically while you're online; good until ${fmtDate(l.expires_at)}.</span></p>
+       <div class="row-gap" style="margin-top:12px"><button class="btn small" data-action="deactivate-license">Remove license from this computer</button></div>`
+    : `<p class="muted">${l.state === "expired" ? "Your license needs renewing. Connect to the internet and re-enter your key. " : ""}Pro labs download once you add a license key. Labs you've already installed keep working either way.</p>
+       <form id="license-form" class="row-gap" style="margin-top:12px" autocomplete="off">
+         <input name="key" class="search" style="min-width:280px" placeholder="License key" aria-label="License key" required>
+         <button class="btn primary" ${S.licenseBusy ? "disabled" : ""}>${S.licenseBusy ? "Checking…" : "Activate"}</button>
+       </form>`;
+  return `<section><div class="section-title"><h2>LabForge Pro</h2></div><div class="panel">${body}</div></section>`;
 }
 // ------------------------------------------------------------- render ----
 
@@ -530,6 +551,7 @@ function viewSystem() {
       <button class="btn" data-action="preflight">Run checks again</button></div>
     ${pf ? `<div class="banner" style="margin-bottom:20px;${pf.ready ? "" : "border-color:rgba(255,92,122,.45);background:rgba(255,92,122,.07)"}"><div class="grow"><strong>${pf.ready ? "Ready to hack." : "Labs can't start yet."}</strong> <span class="muted">${pf.ready ? "Docker and Compose are good to go." : "Fix the items marked ✕ below."}</span></div></div>` : ""}
     <div class="checks">${checks}</div>
+${licensePanel()}
     <section>
       <div class="section-title"><h2>About this install</h2></div>
       <div class="panel"><dl class="kv">
@@ -795,6 +817,12 @@ async function onClick(e) {
     case "copy":
       await navigator.clipboard?.writeText(el.dataset.copy);
       return toast("Copied to clipboard");
+    case "deactivate-license":
+      S.license = await call("deactivate_license");
+      S.labOffers = null;
+      toast("License removed from this computer.");
+      checkLabUpdates();
+      return render();
     case "check-labs":
       return checkLabUpdates(true);
     case "install-lab":
@@ -821,6 +849,21 @@ async function onSubmit(e) {
       go("home");
       toast(`Welcome, ${S.profile.username}!`, "ok");
     });
+  }
+  if (form.id === "license-form") {
+    const key = form.key.value.trim();
+    if (!key) return;
+    S.licenseBusy = true;
+    render();
+    try {
+      S.license = await call("activate_license", { key });
+      toast("License activated. Pro labs are unlocked.", "ok");
+      checkLabUpdates();
+    } catch (err) {
+      toast(String(err), "bad");
+    }
+    S.licenseBusy = false;
+    return render();
   }
   if (form.id === "flag-form") {
     const value = form.flag.value.trim();

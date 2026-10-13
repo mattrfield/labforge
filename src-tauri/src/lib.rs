@@ -1,4 +1,5 @@
 mod catalog;
+mod license;
 mod packs;
 #[cfg(test)]
 mod e2e;
@@ -50,6 +51,8 @@ struct AppState {
     /// Where lab packs downloaded after install live.
     installed_dir: PathBuf,
     app_version: String,
+    license: Mutex<Option<license::Stored>>,
+    machine_id: String,
     data_dir: PathBuf,
     store: Mutex<Store>,
     /// Set while a start/reset/resume pipeline is running.
@@ -484,10 +487,39 @@ fn signing_pubkey(app: &AppHandle) -> CmdResult<String> {
         .ok_or_else(|| "No signing key is configured, so lab updates are unavailable.".to_string())
 }
 
+impl AppState {
+    fn license(&self) -> Option<license::Stored> {
+        self.license.lock().unwrap().clone()
+    }
+
+    fn licensed(&self) -> bool {
+        license::is_active(self.license().as_ref(), &self.machine_id, license::now_secs())
+    }
+
+    fn license_status(&self) -> license::Status {
+        license::status(self.license().as_ref(), &self.machine_id, license::now_secs())
+    }
+}
+
+/// The pro index from the license server, if licensing is configured and the server answers. It is
+/// public metadata (signed by the license key); only the downloads need a license.
+async fn fetch_pro_index(public: &packs::Index) -> Option<packs::Index> {
+    let (server, pubkey) = (license::server_url()?, license::pubkey()?);
+    let mut index = packs::fetch_signed_index(&format!("{server}/v1/index"), &pubkey, &[]).await.ok()?;
+    // Pro entries only: can't shadow a public lab, and must download from the license server.
+    index.labs.retain(|e| e.tier == catalog::Tier::Pro && e.url.starts_with(&server) && !public.labs.iter().any(|p| p.id == e.id));
+    Some(index)
+}
+
 #[tauri::command]
 async fn check_lab_updates(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Vec<packs::Offer>> {
-    let index = packs::fetch_index(&index_url(), &signing_pubkey(&app)?).await?;
-    Ok(packs::offers(&index, &state.catalog(), &state.app_version))
+    let public = packs::fetch_index(&index_url(), &signing_pubkey(&app)?).await?;
+    let catalog = state.catalog();
+    let mut out = packs::offers(&public, &catalog, &state.app_version, false);
+    if let Some(pro) = fetch_pro_index(&public).await {
+        out.extend(packs::offers(&pro, &catalog, &state.app_version, state.licensed()));
+    }
+    Ok(out)
 }
 
 #[derive(Serialize)]
@@ -511,12 +543,19 @@ async fn install_labs(app: AppHandle, state: State<'_, AppState>, ids: Vec<Strin
 }
 
 async fn install_labs_inner(app: &AppHandle, state: &AppState, ids: Vec<String>) -> CmdResult<InstallReport> {
-    let index = packs::fetch_index(&index_url(), &signing_pubkey(app)?).await?;
+    let public = packs::fetch_index(&index_url(), &signing_pubkey(app)?).await?;
+    let pro = fetch_pro_index(&public).await;
     let active_id = state.store.lock().unwrap().active.as_ref().map(|a| a.attempt.lab_id.clone());
     let mut report = InstallReport { installed: vec![], failed: vec![] };
     for id in ids {
         let fail = |error: String| InstallFailure { id: id.clone(), error };
-        let Some(entry) = index.labs.iter().find(|e| e.id == id).cloned() else {
+        let found = public
+            .labs
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| (e.clone(), false))
+            .or_else(|| pro.as_ref().and_then(|p| p.labs.iter().find(|e| e.id == id)).map(|e| (e.clone(), true)));
+        let Some((entry, is_pro)) = found else {
             report.failed.push(fail("That lab isn't in the index.".into()));
             continue;
         };
@@ -524,11 +563,22 @@ async fn install_labs_inner(app: &AppHandle, state: &AppState, ids: Vec<String>)
             report.failed.push(fail("This lab is active. Destroy it before updating.".into()));
             continue;
         }
-        let outcome = match packs::fetch_pack(&entry).await {
+        let headers = if is_pro {
+            match state.license().filter(|_| state.licensed()) {
+                Some(stored) => license::auth_headers(&stored),
+                None => {
+                    report.failed.push(fail("Pro labs need an active license. Add one in System.".into()));
+                    continue;
+                }
+            }
+        } else {
+            vec![]
+        };
+        let outcome = match packs::fetch_pack(&entry, &headers).await {
             Ok(data) => {
                 let (dir, ver) = (state.installed_dir.clone(), state.app_version.clone());
                 let e = entry.clone();
-                tauri::async_runtime::spawn_blocking(move || packs::install(&e, &data, &dir, &ver))
+                tauri::async_runtime::spawn_blocking(move || packs::install(&e, &data, &dir, &ver, is_pro))
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|r| r)
@@ -544,6 +594,44 @@ async fn install_labs_inner(app: &AppHandle, state: &AppState, ids: Vec<String>)
         state.reload_catalog();
     }
     Ok(report)
+}
+
+// ---------- licensing ----------
+
+#[tauri::command]
+fn get_license(state: State<AppState>) -> license::Status {
+    state.license_status()
+}
+
+#[tauri::command]
+async fn activate_license(state: State<'_, AppState>, key: String) -> CmdResult<license::Status> {
+    let stored = license::request(&key, &state.machine_id).await?;
+    license::save(&state.data_dir.join("license.json"), &stored)?;
+    *state.license.lock().unwrap() = Some(stored);
+    Ok(state.license_status())
+}
+
+#[tauri::command]
+fn deactivate_license(state: State<AppState>) -> license::Status {
+    let _ = fs::remove_file(state.data_dir.join("license.json"));
+    *state.license.lock().unwrap() = None;
+    state.license_status()
+}
+
+/// Quietly renews a token that is about to expire. Failures are ignored; the old token keeps working
+/// until it expires, and installed labs never depend on it.
+async fn refresh_license(app: AppHandle) {
+    let state = app.state::<AppState>();
+    let stored = state.license();
+    if !license::needs_refresh(stored.as_ref(), &state.machine_id, license::now_secs()) {
+        return;
+    }
+    let Some(stored) = stored else { return };
+    if let Ok(fresh) = license::request(&stored.key, &state.machine_id).await {
+        if license::save(&state.data_dir.join("license.json"), &fresh).is_ok() {
+            *state.license.lock().unwrap() = Some(fresh);
+        }
+    }
 }
 
 fn current(state: &AppState) -> CmdResult<(Lab, Difficulty)> {
@@ -719,6 +807,8 @@ pub fn run() {
             packs::clean_leftovers(&installed_dir);
             let app_version = app.package_info().version.to_string();
             let catalog = Catalog::load_roots(&labs_dir, &installed_dir, &app_version);
+            let machine_id = license::machine_id(&data_dir);
+            let stored_license = license::load(&data_dir.join("license.json"));
             let mut active: Option<ActiveLab> = read_json::<Option<ActiveLab>>(&data_dir.join("active.json")).flatten();
             // A start that was interrupted by closing the app can't be resumed mid-way.
             if let Some(a) = active.as_mut().filter(|a| a.phase == Phase::Starting) {
@@ -729,7 +819,8 @@ pub fn run() {
                 profile: read_json::<Option<Profile>>(&data_dir.join("profile.json")).flatten(),
                 active: active.filter(|a| catalog.get(&a.attempt.lab_id).is_some()),
             };
-            app.manage(AppState { catalog: RwLock::new(Arc::new(catalog)), labs_dir, installed_dir, app_version, data_dir, store: Mutex::new(store), busy: AtomicBool::new(false) });
+            app.manage(AppState { catalog: RwLock::new(Arc::new(catalog)), labs_dir, installed_dir, app_version, license: Mutex::new(stored_license), machine_id, data_dir, store: Mutex::new(store), busy: AtomicBool::new(false) });
+            tauri::async_runtime::spawn(refresh_license(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -737,6 +828,9 @@ pub fn run() {
             check_update,
             install_update,
             check_lab_updates,
+            get_license,
+            activate_license,
+            deactivate_license,
             install_labs,
             get_profile,
             create_profile,
