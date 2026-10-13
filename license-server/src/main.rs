@@ -1,9 +1,9 @@
 //! Reference license server for LabForge pro labs.
 //!
 //! This is the contract the launcher talks to, with a **stub** key verifier so it can be run and
-//! tested without a Gumroad account. To go live, replace `check_key` with a call to Gumroad's
-//! `POST /v2/licenses/verify` (product_id, license_key, increment_uses_count=false) and put the same
-//! three endpoints behind HTTPS (a Cloudflare Worker or any small host works; nothing here is stateful).
+//! tested without a Gumroad account. Set GUMROAD_PRODUCT_ID to verify keys against Gumroad's
+//! `POST /v2/licenses/verify` instead. Put the same three endpoints behind HTTPS in production
+//! (a Cloudflare Worker or any small host works; nothing here is stateful).
 //!
 //!   POST /v1/license   {"key","machine"} -> {"token","signature"}   signed, expiring token
 //!   GET  /v1/index                       -> pro index.json + X-Signature header (public metadata)
@@ -68,14 +68,84 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-/// STUB. Replace with a Gumroad license verification.
-fn check_key(key: &str) -> Result<(), (u16, &'static str)> {
+type KeyError = (u16, String);
+
+/// Verifies a license key. With `GUMROAD_PRODUCT_ID` set this asks Gumroad; otherwise it uses the
+/// offline stub (`LF-TEST-*` valid, `LF-REVOKED-*` refunded) so the server runs without an account.
+fn check_key(key: &str) -> Result<(), KeyError> {
+    match std::env::var("GUMROAD_PRODUCT_ID") {
+        Ok(product) if !product.trim().is_empty() => check_gumroad(&product, key),
+        _ => check_stub(key),
+    }
+}
+
+fn check_stub(key: &str) -> Result<(), KeyError> {
     if key.starts_with("LF-TEST-") && key.len() > 8 {
         Ok(())
     } else if key.starts_with("LF-REVOKED-") {
-        Err((403, "This license key was refunded or revoked."))
+        Err((403, "This license key was refunded or revoked.".into()))
     } else {
-        Err((404, "That license key wasn't found."))
+        Err((404, "That license key wasn't found.".into()))
+    }
+}
+
+/// Gumroad's license API. `increment_uses_count=false` so checking a key never burns its use count.
+fn check_gumroad(product_id: &str, key: &str) -> Result<(), KeyError> {
+    let reply = ureq::post("https://api.gumroad.com/v2/licenses/verify")
+        .timeout(std::time::Duration::from_secs(10))
+        .send_form(&[("product_id", product_id), ("license_key", key), ("increment_uses_count", "false")]);
+    let body: serde_json::Value = match reply {
+        Ok(r) => r.into_json().map_err(|_| (502, "The license service sent an unreadable reply.".to_string()))?,
+        // Gumroad answers unknown keys with a 404 and a JSON body
+        Err(ureq::Error::Status(404, r)) => r.into_json().unwrap_or_default(),
+        Err(ureq::Error::Status(code, _)) => return Err((502, format!("The license service returned {code}. Try again later."))),
+        Err(_) => return Err((502, "Couldn't reach the license service. Try again later.".into())),
+    };
+    interpret_gumroad(&body)
+}
+
+/// Turns a Gumroad verify response into allow / refuse. Refunded, charged-back or lost-dispute
+/// purchases and ended subscriptions don't count as licensed.
+fn interpret_gumroad(body: &serde_json::Value) -> Result<(), KeyError> {
+    if body["success"].as_bool() != Some(true) {
+        return Err((404, "That license key wasn't found.".into()));
+    }
+    let p = &body["purchase"];
+    let refused = p["refunded"].as_bool() == Some(true)
+        || p["chargebacked"].as_bool() == Some(true)
+        || (p["disputed"].as_bool() == Some(true) && p["dispute_won"].as_bool() != Some(true));
+    if refused {
+        return Err((403, "This license key was refunded or revoked.".into()));
+    }
+    if ["subscription_ended_at", "subscription_cancelled_at", "subscription_failed_at"].iter().any(|f| p[*f].is_string()) {
+        return Err((403, "This subscription is no longer active.".into()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stub_keys() {
+        assert!(check_stub("LF-TEST-1").is_ok());
+        assert_eq!(check_stub("LF-REVOKED-1").unwrap_err().0, 403);
+        assert_eq!(check_stub("x").unwrap_err().0, 404);
+    }
+
+    #[test]
+    fn gumroad_replies_are_interpreted() {
+        assert!(interpret_gumroad(&json!({"success": true, "uses": 1, "purchase": {"refunded": false}})).is_ok());
+        assert_eq!(interpret_gumroad(&json!({"success": false, "message": "That license does not exist"})).unwrap_err().0, 404);
+        assert_eq!(interpret_gumroad(&json!({"success": true, "purchase": {"refunded": true}})).unwrap_err().0, 403);
+        assert_eq!(interpret_gumroad(&json!({"success": true, "purchase": {"chargebacked": true}})).unwrap_err().0, 403);
+        assert_eq!(interpret_gumroad(&json!({"success": true, "purchase": {"disputed": true, "dispute_won": false}})).unwrap_err().0, 403);
+        assert!(interpret_gumroad(&json!({"success": true, "purchase": {"disputed": true, "dispute_won": true}})).is_ok());
+        assert_eq!(interpret_gumroad(&json!({"success": true, "purchase": {"subscription_cancelled_at": "2026-01-01T00:00:00Z"}})).unwrap_err().0, 403);
+        assert!(interpret_gumroad(&json!({"success": true, "purchase": {"subscription_cancelled_at": null}})).is_ok());
+        assert_eq!(interpret_gumroad(&json!({})).unwrap_err().0, 404);
     }
 }
 

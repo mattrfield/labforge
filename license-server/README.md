@@ -28,7 +28,7 @@ LABFORGE_LICENSE_URL=... LABFORGE_LICENSE_PUBKEY=... cargo test --lib license::l
 
 ## Going live
 
-1. Replace `check_key` with a call to Gumroad's `POST https://api.gumroad.com/v2/licenses/verify` (`product_id`, `license_key`, `increment_uses_count=false`; treat refunded, chargebacked or disputed purchases as invalid).
+1. Set `GUMROAD_PRODUCT_ID` (the product ID shown under the License key block in the product's Content tab). The server then verifies keys with Gumroad's `POST https://api.gumroad.com/v2/licenses/verify` (`increment_uses_count=false`, so checking never burns a key) and refuses refunded, charged-back, lost-dispute and ended-subscription purchases. Without the variable it uses the stub keys. The reply handling is unit-tested, but it hasn't been exercised against a live Gumroad product yet: buy your own product once (use a 100% discount code) and activate that key before launch.
 2. Host the three endpoints over HTTPS (nothing is stateful, so a Cloudflare Worker, Fly.io or any small VPS works). Serve pack bytes from private storage, ideally by redirecting to a short-lived signed URL.
 3. Generate a production signing key pair, keep the secret key on the server only, and set `SERVER` and `PUBKEY` in `src-tauri/src/license.rs`. Until both are set, licensing stays hidden in release builds.
 4. Build pro packs with `scripts/build_lab_packs.py --tier pro` and upload them (and `index.json`) to the license server's storage. Never publish pro packs to the public `labs` release.
