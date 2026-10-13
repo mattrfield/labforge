@@ -1,0 +1,53 @@
+# LabForge license server behind Caddy (automatic HTTPS). See README.md in this folder.
+services:
+  license:
+    build:
+      context: ..
+    restart: unless-stopped
+    environment:
+      GUMROAD_PRODUCT_ID: ${GUMROAD_PRODUCT_ID:?set GUMROAD_PRODUCT_ID in .env}
+    command:
+      - serve
+      - --bind
+      - 0.0.0.0
+      - --keys
+      - /data/keys
+      - --packs
+      - /data/packs
+      - --trust-proxy
+      - --ttl-secs
+      - ${TOKEN_TTL_SECS:-1209600}
+    volumes:
+      - keys:/data/keys
+      - ./packs:/data/packs:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    # Not published: only Caddy can reach it.
+    expose: ["8787"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8787'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [license]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      LICENSE_DOMAIN: ${LICENSE_DOMAIN:?set LICENSE_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  keys:
+  caddy_data:
+  caddy_config:

@@ -9,3 +9,5 @@
 /dist-labs/
 __pycache__/
 *.pyc
+/license-server/deploy/.env
+/license-server/deploy/packs/
