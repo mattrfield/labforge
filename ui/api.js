@@ -91,7 +91,7 @@ const mock = (() => {
       };
     },
     list_labs: () => ({
-      labs: labs.map((l) => ({ ...l, pwned: l.difficulties.filter((d) => profile?.pwned.includes(`${l.id}:${d}`)) })),
+      labs: labs.map((l) => ({ version: "1.0.0", tier: "free", source: "bundled", ...l, pwned: l.difficulties.filter((d) => profile?.pwned.includes(`${l.id}:${d}`)) })),
       errors: [],
       labs_dir: "(browser preview)",
     }),

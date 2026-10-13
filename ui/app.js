@@ -621,6 +621,7 @@ function modalLab({ id }) {
         <dt>Time</dt><dd>~${l.est_minutes} minutes</dd>
         <dt>Needs</dt><dd>${l.resources.ram_mb} MB RAM · ${l.resources.cpus} CPU · ${l.resources.disk_mb} MB disk ${ft ? `<span class="pill ${ft[0]}" style="margin-left:6px">${ft[1]}</span>` : ""}</dd>
         <dt>Network</dt><dd class="mono">${esc(l.subnet)} · ${l.hosts.length} host${l.hosts.length === 1 ? "" : "s"}</dd>
+        <dt>Version</dt><dd>v${esc(l.version ?? "1.0.0")} <span class="faint">· ${l.source === "installed" ? "downloaded update" : "bundled with LabForge"}${l.tier === "pro" ? " · Pro" : ""}</span></dd>
       </dl>
       <div class="modal-foot">
         <span class="faint" style="font-size:13px">${blocked ? `${esc(lab(S.active.lab_id)?.name)} is still active. Destroy it first.` : notReady ? "Your machine needs setup first. See System." : running ? "This lab is already running." : "You'll get a notification when it's ready."}</span>
