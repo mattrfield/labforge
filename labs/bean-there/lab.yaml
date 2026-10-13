@@ -1,0 +1,42 @@
+id: bean-there
+name: Bean There
+track: web
+blurb: A neighbourhood coffee shop just launched online ordering. Their staff portal looks... hand-rolled.
+story: >
+  Bean There's owner built the shop's website over a weekend. Customers can browse the
+  menu, and staff log in to manage orders and check that the espresso machine is online.
+  Get into the staff portal, land a shell on the web server, and take root.
+skills: [sql-injection, command-injection, suid-privesc, enumeration]
+xp: 100
+est_minutes: 45
+difficulties: [easy, medium]
+difficulty_notes:
+  easy: Verbose errors and no input filtering. A classic first box.
+  medium: A homemade filter guards the inputs, errors are quiet, and the obvious privesc is gone.
+resources: { ram_mb: 256, cpus: 0.5, disk_mb: 250 }
+subnet_octet: 11
+hosts:
+  - name: web01
+    service: web
+    os: Debian Linux
+    ports:
+      - { port: 80, service: http (Flask) }
+flags:
+  - id: user
+    label: User flag
+    host: web01
+    path: /home/barista/user.txt
+    owner: barista:barista
+    xp_share: 0.4
+  - id: root
+    label: Root flag
+    host: web01
+    path: /root/root.txt
+    xp_share: 0.6
+hints:
+  - text: The staff login builds its SQL query straight from your input. What does a single quote do to it?
+    cost: 0.1
+  - text: Admins get a diagnostics page that pings hosts by running a shell command. Can you make it run a second one? On medium, the filter forgets that shells have more than one way to separate commands.
+    cost: 0.1
+  - text: "Once you have a shell, list SUID binaries: find / -perm -4000 2>/dev/null. On medium, see what the custom one runs, and whether it uses full paths."
+    cost: 0.15

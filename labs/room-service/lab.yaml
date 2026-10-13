@@ -1,0 +1,52 @@
+id: room-service
+name: Room Service
+track: network
+blurb: A boutique hotel's front desk leaves the door unlocked. Behind it sits the back office.
+story: >
+  The Grand Meridian is proud of its seamless guest experience. Its IT is one very busy person with
+  a cron job and a dream. Scan the hotel network, get onto the front-desk machine, find the way to
+  the back office, and take over the server where the hotel keeps its secrets.
+skills: [nmap-enumeration, anonymous-ftp, password-cracking, ssh, redis-misconfiguration, pivoting]
+xp: 150
+est_minutes: 60
+difficulties: [easy, medium]
+difficulty_notes:
+  easy: Plaintext credentials lying around, and a back-office cache with no password.
+  medium: Credentials are hashed, the cache is password-protected, and nothing is handed to you.
+resources: { ram_mb: 256, cpus: 0.5, disk_mb: 400 }
+subnet_octet: 13
+hosts:
+  - name: frontdesk
+    service: frontdesk
+    os: Debian Linux
+    ports:
+      - { port: 21, service: ftp (vsftpd) }
+      - { port: 22, service: ssh (OpenSSH) }
+  - name: backoffice
+    service: backoffice
+    os: Debian Linux
+    ports:
+      - { port: 22, service: ssh (OpenSSH) }
+      - { port: 6379, service: redis }
+flags:
+  - id: user
+    label: User flag
+    host: frontdesk
+    path: /home/concierge/user.txt
+    owner: concierge:concierge
+    xp_share: 0.4
+  - id: root
+    label: Root flag
+    host: backoffice
+    path: /root/root.txt
+    xp_share: 0.6
+hints:
+  - text: Scan both hosts with nmap -sV. One of them lets you log in to FTP without an account.
+    cost: 0.1
+  - text: What you find on FTP is a staff export. On medium, the password is hashed, so try a wordlist. Then SSH to the front desk and look around your home directory and /opt.
+    cost: 0.1
+  - text: The back office runs Redis. A Redis server that lets you change its own save directory and file name lets you write files as whoever runs it. What would you write to /root/.ssh?
+    cost: 0.15
+map:
+  edges:
+    - { from: frontdesk, to: backoffice, label: "Back-office Redis reachable from the front desk network" }

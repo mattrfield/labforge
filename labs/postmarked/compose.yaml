@@ -1,0 +1,29 @@
+# Variables (IP_API01, LAB_SUBNET, DIFFICULTY, ...) are supplied by the launcher.
+services:
+  api:
+    build: ./target
+    image: labforge/postmarked:0.1
+    hostname: api01
+    environment:
+      DIFFICULTY: ${DIFFICULTY:-easy}
+    networks:
+      lab:
+        ipv4_address: ${IP_API01:-10.66.12.10}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    mem_limit: 256m
+    cpus: 0.5
+
+networks:
+  lab:
+    driver: bridge
+    # No route to the internet or the user's LAN; the host can still reach the subnet.
+    internal: true
+    ipam:
+      config:
+        - subnet: ${LAB_SUBNET:-10.66.12.0/24}
+          gateway: ${LAB_GATEWAY:-10.66.12.1}

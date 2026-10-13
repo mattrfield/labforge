@@ -1,0 +1,47 @@
+# Variables (IP_FRONTDESK, IP_BACKOFFICE, LAB_SUBNET, DIFFICULTY, ...) are supplied by the launcher.
+services:
+  frontdesk:
+    build: ./frontdesk
+    image: labforge/room-service-frontdesk:0.1
+    hostname: frontdesk
+    environment:
+      DIFFICULTY: ${DIFFICULTY:-easy}
+    networks:
+      lab:
+        ipv4_address: ${IP_FRONTDESK:-10.66.13.10}
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/22 && echo > /dev/tcp/127.0.0.1/21"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    mem_limit: 128m
+    cpus: 0.25
+
+  backoffice:
+    build: ./backoffice
+    image: labforge/room-service-backoffice:0.1
+    hostname: backoffice
+    environment:
+      DIFFICULTY: ${DIFFICULTY:-easy}
+    networks:
+      lab:
+        ipv4_address: ${IP_BACKOFFICE:-10.66.13.11}
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/22 && echo > /dev/tcp/127.0.0.1/6379"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    mem_limit: 128m
+    cpus: 0.25
+
+networks:
+  lab:
+    driver: bridge
+    # No route to the internet or the user's LAN; the host can still reach the subnet.
+    internal: true
+    ipam:
+      config:
+        - subnet: ${LAB_SUBNET:-10.66.13.0/24}
+          gateway: ${LAB_GATEWAY:-10.66.13.1}

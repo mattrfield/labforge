@@ -1,0 +1,46 @@
+id: postmarked
+name: Postmarked
+track: api
+blurb: A parcel-delivery startup shipped its REST API before it shipped its security review.
+story: >
+  Postmarked promises "doorstep delivery in under an hour", and its engineers move fast. The public API
+  lets customers track parcels, and a back-office endpoint prints sorting-hall labels. Poke at the API,
+  work your way up to the dispatcher's privileges, land a shell on the server, and take root.
+skills: [api-enumeration, bola-idor, mass-assignment, jwt, ssti, cron-privesc]
+xp: 120
+est_minutes: 50
+difficulties: [easy, medium]
+difficulty_notes:
+  easy: Chatty errors, full API docs, and a profile endpoint that trusts every field you send.
+  medium: Terse errors, undocumented admin routes, roles come from the token, and the root-run job is locked down.
+resources: { ram_mb: 256, cpus: 0.5, disk_mb: 250 }
+subnet_octet: 12
+hosts:
+  - name: api01
+    service: api
+    os: Debian Linux
+    ports:
+      - { port: 80, service: http (JSON REST API) }
+flags:
+  - id: user
+    label: User flag
+    host: api01
+    path: /home/courier/user.txt
+    owner: courier:courier
+    xp_share: 0.4
+  - id: root
+    label: Root flag
+    host: api01
+    path: /root/root.txt
+    xp_share: 0.6
+hints:
+  - text: Start at /api/v1/docs, register an account and log in. Then look at who else's data you can fetch by changing an id in the URL.
+    cost: 0.1
+  - text: Easy - PATCH /api/v1/me returns your whole user record. Does it only accept the fields it shows you? Medium - the token carries your role. How is it signed, and how strong is the secret?
+    cost: 0.1
+  - text: The label preview renders your template with Jinja2. Try {{7*7}}. On medium the filter checks for substrings, but Jinja can build strings and attribute names at runtime.
+    cost: 0.1
+  - text: Something root-owned runs on a timer. Check /opt/postbox and what it touches. On medium, think about what a shell glob does with filenames that look like options.
+    cost: 0.1
+map:
+  edges: []
