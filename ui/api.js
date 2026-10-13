@@ -65,6 +65,8 @@ const mock = (() => {
   }
 
   const handlers = {
+    check_lab_updates: () => (location.search.includes("labs") ? [{ id: "tidewater", name: "Tidewater", version: "1.0.0", installed_version: null, tier: "free", size: 48200, blurb: "A harbour-master portal with a leaky API.", locked: false, blocked: null }, { id: "bean-there", name: "Bean There", version: "1.1.0", installed_version: "1.0.0", tier: "free", size: 12100, blurb: "", locked: false, blocked: null }, { id: "deep-vault", name: "Deep Vault", version: "1.0.0", installed_version: null, tier: "pro", size: 90000, blurb: "", locked: true, blocked: null }] : []),
+    install_labs: ({ ids }) => ({ installed: ids, failed: [] }),
     app_info: () => ({ version: "0.1.0" }),
     check_update: () => (location.search.includes("update") ? { version: "0.2.0", notes: null } : null),
     install_update: () => { throw new Error("Updates only work in the desktop app."); },

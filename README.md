@@ -38,6 +38,18 @@ Each lab lives in `labs/<id>/` with:
 
 Flags are generated fresh on every start as `LF{<32 hex>}`. They're written into the containers over `docker exec` stdin, at the manifest's path, owner and mode. Only SHA-256 hashes are stored locally.
 
+## Releases and lab updates
+
+**Launcher.** Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the installers and publishes a GitHub Release with a signed `latest.json`. Installed launchers check it on start and offer **Install & restart**.
+
+**Labs.** Labs update separately from the launcher, so a new lab doesn't need a new app release:
+
+- Each `lab.yaml` has a `version` (semver). **Bump it whenever a lab's files change**, or installed copies won't update. Optional fields: `tier` (`free` is the default; anything else is never published to the public index) and `min_app_version`.
+- Pushing changes under `labs/` to `main` runs `.github/workflows/labs.yml`. It runs `scripts/build_lab_packs.py` to build one `<id>-<version>.tar.gz` per free lab plus `index.json` (URLs and SHA-256 hashes), signs the index with the same key as launcher updates, and uploads everything to the rolling `labs` prerelease.
+- In the app, **Labs → Check for new labs** (also run at start) fetches the index, verifies its signature, and lists new and updated labs. Packs are checked against the signed hash, unpacked only if every path stays inside the lab's folder (no links or special files, size and file-count capped), validated, then swapped into `<app data>/labs/`. Newer installed labs override bundled ones; the learner's progress is never touched. A lab that is currently active can't be updated until it's destroyed.
+
+Set `LABFORGE_INDEX_URL` to point the launcher at a different index (it must still be signed by the launcher's key). To try the pipeline locally, build the packs with `--base-url http://127.0.0.1:8098`, sign `index.json` with `cargo tauri signer sign`, serve the folder, and run `cargo test --lib live -- --ignored` with `LABFORGE_TEST_INDEX_URL` and `LABFORGE_TEST_PUBKEY` set.
+
 ## MVP status
 
 Done:
@@ -58,4 +70,5 @@ cd src-tauri && cargo test --lib e2e -- --ignored --nocapture --test-threads=1
 ```
 - WireGuard gateway, so a separate attack VM can join the lab network (today: attack from the host, which routes to the lab subnet directly on Linux)
 - Prebuilt, signed lab images pulled from a registry instead of local builds
+- License-gated pro labs (the index already has a `tier` field; pro entries are shown locked and can't be installed yet)
 - Splitting the orchestrator into a separate daemon with a privileged helper (it currently runs inside the app process)

@@ -272,3 +272,8 @@ th { color: var(--faint); font-weight: 600; font-size: 12px; text-transform: upp
 
 .update-card { display: grid; gap: 6px; padding: 12px; margin-bottom: 12px; border-radius: 12px; background: var(--panel-2); border: 1px solid rgba(24, 214, 163, 0.5); font-size: 13px; }
 .ok-text { color: var(--ok, #18d6a3); }
+
+.row-gap { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.offer { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.offer:first-of-type { border-top: 0; }
+.offer .grow { flex: 1; }

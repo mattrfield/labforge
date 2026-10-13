@@ -1,0 +1,49 @@
+name: Publish labs
+
+# Packs and the signed index live on a rolling prerelease tagged `labs`. It is a prerelease so
+# GitHub never treats it as the "latest" release that the launcher updater reads latest.json from.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "labs/**"
+      - "scripts/build_lab_packs.py"
+      - ".github/workflows/labs.yml"
+  workflow_dispatch:
+
+concurrency: publish-labs
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build packs and index
+        run: |
+          python3 scripts/build_lab_packs.py \
+            --out dist-labs \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/labs"
+
+      - name: Sign the index
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          printf '%s' "$KEY" > "$RUNNER_TEMP/labforge.key"
+          npx --yes @tauri-apps/cli@2 signer sign -f "$RUNNER_TEMP/labforge.key" -p "$KEY_PASSWORD" dist-labs/index.json
+          rm -f "$RUNNER_TEMP/labforge.key"
+          test -s dist-labs/index.json.sig
+
+      - name: Publish to the labs release
+        run: |
+          gh release view labs >/dev/null 2>&1 || gh release create labs \
+            --prerelease --latest=false --title "Lab packs" \
+            --notes "Rolling release holding lab packs and the signed lab index. Managed by CI; not a launcher release."
+          # packs first, then the index that points at them
+          gh release upload labs dist-labs/*.tar.gz --clobber
+          gh release upload labs dist-labs/index.json dist-labs/index.json.sig --clobber

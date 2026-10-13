@@ -61,7 +61,7 @@ fn run_exploit(lab: &Lab, script: &str, d: Difficulty) -> BTreeMap<String, Strin
 }
 
 fn run_lab(lab_id: &str, d: Difficulty, expect_xp: (u32, u32), exploit: Option<&str>) {
-    let catalog = Catalog::load(&root_dir().join("../labs"));
+    let catalog = Catalog::load_dir(&root_dir().join("../labs"), crate::catalog::Source::Bundled);
     assert!(catalog.errors.is_empty(), "{:?}", catalog.errors);
     let lab = catalog.get(lab_id).unwrap_or_else(|| panic!("{lab_id} in catalog")).clone();
     let m = &lab.manifest;

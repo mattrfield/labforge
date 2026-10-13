@@ -1,5 +1,6 @@
 id: room-service
 name: Room Service
+version: 1.0.0
 track: network
 blurb: A boutique hotel's front desk leaves the door unlocked. Behind it sits the back office.
 story: >

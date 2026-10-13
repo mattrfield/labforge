@@ -1,5 +1,6 @@
 id: postmarked
 name: Postmarked
+version: 1.0.0
 track: api
 blurb: A parcel-delivery startup shipped its REST API before it shipped its security review.
 story: >

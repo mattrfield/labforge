@@ -50,6 +50,9 @@ const S = {
   update: null,
   updateState: "idle",
   updateMsg: "",
+  labOffers: null,
+  labState: "idle",
+  labMsg: "",
 };
 
 const lab = (id) => S.labs.find((l) => l.id === id);
@@ -97,6 +100,7 @@ async function boot() {
   runPreflight();
   call("app_info").then((i) => { S.version = i.version; if (S.view === "system") render(); });
   checkUpdate();
+  checkLabUpdates();
 }
 
 function setCatalogue(c) {
@@ -172,6 +176,67 @@ function updateBanner() {
   const busy = S.updateState === "installing";
   return `<div class="update-card"><strong>Update available</strong><span class="muted">LabForge ${esc(S.update.version)}</span>
     <button class="btn small primary" data-action="install-update" ${busy ? "disabled" : ""}>${busy ? esc(S.updateMsg) : "Install & restart"}</button></div>`;
+}
+
+// ---------------------------------------------------------- lab packs ----
+
+const fmtSize = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+
+async function checkLabUpdates(manual = false) {
+  if (S.labState !== "idle") return;
+  S.labState = "checking";
+  S.labMsg = "";
+  if (S.view === "labs") render();
+  try {
+    S.labOffers = await call("check_lab_updates");
+    S.labMsg = S.labOffers.length ? "" : "All labs are up to date.";
+    if (manual && !S.labOffers.length) toast(S.labMsg, "ok");
+  } catch (e) {
+    // Offline or no index published yet: only complain when the learner asked.
+    S.labOffers = [];
+    S.labMsg = manual ? `Couldn't check for new labs: ${e}` : "";
+    if (manual) toast(S.labMsg, "bad");
+  }
+  S.labState = "idle";
+  if (S.view === "labs") render();
+}
+
+async function installLabs(ids) {
+  if (S.labState !== "idle" || !ids.length) return;
+  S.labState = "installing";
+  S.labMsg = "";
+  if (S.view === "labs") render();
+  try {
+    const r = await call("install_labs", { ids });
+    setCatalogue(await call("list_labs"));
+    S.labOffers = S.labOffers.filter((o) => !r.installed.includes(o.id));
+    if (r.installed.length) toast(`Installed ${r.installed.length} lab${r.installed.length === 1 ? "" : "s"}.`, "ok");
+    r.failed.forEach((f) => toast(`${f.id}: ${f.error}`, "bad"));
+  } catch (e) {
+    toast(`Couldn't install: ${e}`, "bad");
+  }
+  S.labState = "idle";
+  render();
+}
+
+function labOffersPanel() {
+  const busy = S.labState !== "idle";
+  const offers = S.labOffers ?? [];
+  if (!offers.length) return S.labMsg ? `<p class="faint" style="margin-bottom:16px">${esc(S.labMsg)}</p>` : "";
+  const installable = offers.filter((o) => !o.locked && !o.blocked);
+  const rows = offers
+    .map((o) => {
+      const what = o.installed_version ? `Update ${esc(o.installed_version)} → ${esc(o.version)}` : `New · v${esc(o.version)}`;
+      const action = o.locked
+        ? `<span class="faint">Pro</span>`
+        : o.blocked
+          ? `<span class="faint">${esc(o.blocked)}</span>`
+          : `<button class="btn small" data-action="install-lab" data-id="${esc(o.id)}" ${busy ? "disabled" : ""}>Install</button>`;
+      return `<div class="offer"><div class="grow"><strong>${esc(o.name)}</strong> <span class="faint">${what} · ${fmtSize(o.size)}</span>${o.blurb ? `<p class="faint" style="font-size:13px">${esc(o.blurb)}</p>` : ""}</div>${action}</div>`;
+    })
+    .join("");
+  return `<div class="panel" style="margin-bottom:20px"><div class="section-title"><h2>${offers.length} lab${offers.length === 1 ? "" : "s"} available</h2>
+      ${installable.length > 1 ? `<button class="btn small primary" data-action="install-all-labs" ${busy ? "disabled" : ""}>${S.labState === "installing" ? "Installing…" : "Install all"}</button>` : ""}</div>${rows}</div>`;
 }
 // ------------------------------------------------------------- render ----
 
@@ -270,7 +335,9 @@ function viewLabs() {
     .join("");
   return `
     <div class="page-head"><div><h1>Labs</h1><p class="muted">Every lab runs locally in containers on its own isolated network.</p></div>
-      <input id="lab-search" class="search" type="search" placeholder="Search labs or skills" value="${esc(f.q)}" aria-label="Search labs"></div>
+      <div class="row-gap"><button class="btn" data-action="check-labs" ${S.labState !== "idle" ? "disabled" : ""}>${S.labState === "checking" ? "Checking…" : "Check for new labs"}</button>
+      <input id="lab-search" class="search" type="search" placeholder="Search labs or skills" value="${esc(f.q)}" aria-label="Search labs"></div></div>
+    ${labOffersPanel()}
     <div class="filters"><div class="chips">${trackChips}</div><div class="chips">${statusChips}</div></div>
     <div class="grid labs" id="lab-grid"></div>
     ${S.errors.length ? `<p class="faint" style="margin-top:20px">${S.errors.length} lab package${S.errors.length === 1 ? "" : "s"} couldn't be loaded. See System.</p>` : ""}`;
@@ -727,6 +794,12 @@ async function onClick(e) {
     case "copy":
       await navigator.clipboard?.writeText(el.dataset.copy);
       return toast("Copied to clipboard");
+    case "check-labs":
+      return checkLabUpdates(true);
+    case "install-lab":
+      return installLabs([id]);
+    case "install-all-labs":
+      return installLabs((S.labOffers ?? []).filter((o) => !o.locked && !o.blocked).map((o) => o.id));
     case "check-update":
       return checkUpdate(true);
     case "install-update":

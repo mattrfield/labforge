@@ -16,6 +16,14 @@ pub enum Track {
     Ad,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    #[default]
+    Free,
+    Pro,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Difficulty {
@@ -90,6 +98,10 @@ pub struct FlagSpec {
     pub xp_share: f64,
 }
 
+fn default_version() -> String {
+    "1.0.0".into()
+}
+
 fn default_owner() -> String {
     "root:root".into()
 }
@@ -123,6 +135,14 @@ pub struct MapSpec {
 pub struct LabManifest {
     pub id: String,
     pub name: String,
+    /// Semantic version of the lab package. Higher wins when a lab is both bundled and installed.
+    #[serde(default = "default_version")]
+    pub version: String,
+    #[serde(default)]
+    pub tier: Tier,
+    /// Oldest launcher version that can run this lab.
+    #[serde(default)]
+    pub min_app_version: Option<String>,
     pub track: Track,
     pub blurb: String,
     #[serde(default)]
@@ -167,6 +187,14 @@ impl LabManifest {
         if !valid_id {
             problems.push(format!("id `{}` must be lowercase letters, digits and dashes", self.id));
         }
+        if semver::Version::parse(&self.version).is_err() {
+            problems.push(format!("version `{}` must be a semantic version like 1.2.0", self.version));
+        }
+        if let Some(min) = &self.min_app_version {
+            if semver::Version::parse(min).is_err() {
+                problems.push(format!("min_app_version `{min}` must be a semantic version"));
+            }
+        }
         if self.difficulties.is_empty() {
             problems.push("at least one difficulty is required".into());
         }
@@ -205,13 +233,27 @@ impl LabManifest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// Shipped inside the launcher.
+    Bundled,
+    /// Downloaded later into the app data directory.
+    Installed,
+}
+
 #[derive(Debug, Clone)]
 pub struct Lab {
     pub manifest: LabManifest,
     pub dir: PathBuf,
+    pub source: Source,
 }
 
 impl Lab {
+    pub fn version(&self) -> semver::Version {
+        semver::Version::parse(&self.manifest.version).unwrap_or_else(|_| semver::Version::new(0, 0, 0))
+    }
+
     pub fn compose_files(&self, difficulty: Difficulty) -> Vec<PathBuf> {
         let mut files = vec![self.dir.join("compose.yaml")];
         let overlay = self.dir.join(format!("compose.{}.yaml", difficulty.as_str()));
@@ -230,7 +272,41 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    pub fn load(root: &Path) -> Catalog {
+    /// Loads the bundled labs, then the installed ones. A lab present in both keeps the higher
+    /// version (bundled wins a tie), and labs that need a newer launcher are skipped.
+    pub fn load_roots(bundled: &Path, installed: &Path, app_version: &str) -> Catalog {
+        let mut out = Catalog::load_dir(bundled, Source::Bundled);
+        let extra = if installed.is_dir() { Catalog::load_dir(installed, Source::Installed) } else { Catalog::default() };
+        out.errors.extend(extra.errors);
+        let app = semver::Version::parse(app_version).ok();
+        for lab in extra.labs {
+            if let (Some(app), Some(min)) = (&app, lab.manifest.min_app_version.as_deref().and_then(|v| semver::Version::parse(v).ok())) {
+                if *app < min {
+                    out.errors.push(format!("{}: needs LabForge {min} or newer (this is {app})", lab.manifest.id));
+                    continue;
+                }
+            }
+            match out.labs.iter().position(|l| l.manifest.id == lab.manifest.id) {
+                Some(i) if lab.version() > out.labs[i].version() => out.labs[i] = lab,
+                Some(_) => {}
+                None => out.labs.push(lab),
+            }
+        }
+        out.labs.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+        let mut octets: HashSet<u8> = HashSet::new();
+        let mut kept = Vec::new();
+        for lab in std::mem::take(&mut out.labs) {
+            if octets.insert(lab.manifest.subnet_octet) {
+                kept.push(lab);
+            } else {
+                out.errors.push(format!("{}: subnet_octet {} is already used by another lab", lab.manifest.id, lab.manifest.subnet_octet));
+            }
+        }
+        out.labs = kept;
+        out
+    }
+
+    pub fn load_dir(root: &Path, source: Source) -> Catalog {
         let mut catalog = Catalog::default();
         let entries = match fs::read_dir(root) {
             Ok(e) => e,
@@ -256,7 +332,7 @@ impl Catalog {
                     if !dir.join("compose.yaml").is_file() {
                         catalog.errors.push(format!("{name}: missing compose.yaml"));
                     } else if problems.is_empty() {
-                        catalog.labs.push(Lab { manifest: m, dir });
+                        catalog.labs.push(Lab { manifest: m, dir, source });
                     } else {
                         catalog.errors.push(format!("{name}: {}", problems.join("; ")));
                     }
@@ -322,7 +398,7 @@ flags:
     #[test]
     fn bundled_labs_are_valid() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../labs");
-        let catalog = Catalog::load(&root);
+        let catalog = Catalog::load_dir(&root, Source::Bundled);
         assert!(catalog.errors.is_empty(), "{:?}", catalog.errors);
         assert!(!catalog.labs.is_empty());
         let octets: HashSet<u8> = catalog.labs.iter().map(|l| l.manifest.subnet_octet).collect();

@@ -1,4 +1,5 @@
 mod catalog;
+mod packs;
 #[cfg(test)]
 mod e2e;
 mod preflight;
@@ -13,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
@@ -44,8 +45,11 @@ struct Store {
 }
 
 struct AppState {
-    catalog: Catalog,
+    catalog: RwLock<Arc<Catalog>>,
     labs_dir: PathBuf,
+    /// Where lab packs downloaded after install live.
+    installed_dir: PathBuf,
+    app_version: String,
     data_dir: PathBuf,
     store: Mutex<Store>,
     /// Set while a start/reset/resume pipeline is running.
@@ -53,8 +57,17 @@ struct AppState {
 }
 
 impl AppState {
-    fn lab(&self, id: &str) -> CmdResult<&Lab> {
-        self.catalog.get(id).ok_or_else(|| format!("Unknown lab `{id}`"))
+    fn catalog(&self) -> Arc<Catalog> {
+        self.catalog.read().unwrap().clone()
+    }
+
+    fn reload_catalog(&self) {
+        let fresh = Catalog::load_roots(&self.labs_dir, &self.installed_dir, &self.app_version);
+        *self.catalog.write().unwrap() = Arc::new(fresh);
+    }
+
+    fn lab(&self, id: &str) -> CmdResult<Lab> {
+        self.catalog().get(id).cloned().ok_or_else(|| format!("Unknown lab `{id}`"))
     }
 
     fn save(&self, store: &Store) {
@@ -135,6 +148,9 @@ struct LabView {
     flags: Vec<FlagView>,
     hint_count: usize,
     pwned: Vec<Difficulty>,
+    version: String,
+    tier: catalog::Tier,
+    source: catalog::Source,
 }
 
 #[derive(Serialize)]
@@ -168,7 +184,7 @@ fn max_map_level(lab: &Lab) -> u8 {
 }
 
 fn active_view(state: &AppState, a: &ActiveLab) -> Option<ActiveView> {
-    let lab = state.catalog.get(&a.attempt.lab_id)?;
+    let lab = state.lab(&a.attempt.lab_id).ok()?;
     let m = &lab.manifest;
     Some(ActiveView {
         lab_id: m.id.clone(),
@@ -180,7 +196,7 @@ fn active_view(state: &AppState, a: &ActiveLab) -> Option<ActiveView> {
         hints: m.hints.iter().take(a.attempt.hints_revealed).map(|h| h.text.clone()).collect(),
         next_hint_cost: m.hints.get(a.attempt.hints_revealed).map(|h| h.cost),
         map_level: a.attempt.map_level,
-        max_map_level: max_map_level(lab),
+        max_map_level: max_map_level(&lab),
         penalty: a.attempt.penalty(m),
     })
 }
@@ -283,8 +299,8 @@ async fn run_preflight(state: State<'_, AppState>) -> CmdResult<preflight::Repor
 fn list_labs(state: State<AppState>) -> Catalogue {
     let store = state.store.lock().unwrap();
     let pwned = store.profile.as_ref().map(|p| p.pwned.clone()).unwrap_or_default();
-    let labs = state
-        .catalog
+    let catalog = state.catalog();
+    let labs = catalog
         .labs
         .iter()
         .map(|lab| {
@@ -315,6 +331,9 @@ fn list_labs(state: State<AppState>) -> Catalogue {
                     .map(|f| FlagView { id: f.id.clone(), label: f.label.clone(), host: f.host.clone() })
                     .collect(),
                 hint_count: m.hints.len(),
+                version: m.version.clone(),
+                tier: m.tier,
+                source: lab.source,
                 pwned: m
                     .difficulties
                     .iter()
@@ -324,7 +343,7 @@ fn list_labs(state: State<AppState>) -> Catalogue {
             }
         })
         .collect();
-    Catalogue { labs, errors: state.catalog.errors.clone(), labs_dir: state.labs_dir.display().to_string() }
+    Catalogue { labs, errors: catalog.errors.clone(), labs_dir: state.labs_dir.display().to_string() }
 }
 
 #[tauri::command]
@@ -439,12 +458,92 @@ async fn start_lab(app: AppHandle, state: State<'_, AppState>, lab_id: String, d
             return Err("Create your profile first.".into());
         }
         if let Some(a) = &store.active {
-            let name = state.catalog.get(&a.attempt.lab_id).map(|l| l.manifest.name.clone()).unwrap_or_default();
+            let name = state.lab(&a.attempt.lab_id).map(|l| l.manifest.name).unwrap_or_default();
             return Err(format!("{name} is still active. Destroy it before starting another lab."));
         }
     }
     claim_busy(&state)?;
     launch(&app, &state, &lab_id, difficulty).inspect_err(|_| state.busy.store(false, Ordering::SeqCst))
+}
+
+// ---------- lab packs ----------
+
+fn index_url() -> String {
+    std::env::var("LABFORGE_INDEX_URL").unwrap_or_else(|_| packs::INDEX_URL.to_string())
+}
+
+/// The launcher-update public key doubles as the lab index signing key.
+fn signing_pubkey(app: &AppHandle) -> CmdResult<String> {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|u| u.get("pubkey"))
+        .and_then(|k| k.as_str())
+        .map(String::from)
+        .ok_or_else(|| "No signing key is configured, so lab updates are unavailable.".to_string())
+}
+
+#[tauri::command]
+async fn check_lab_updates(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Vec<packs::Offer>> {
+    let index = packs::fetch_index(&index_url(), &signing_pubkey(&app)?).await?;
+    Ok(packs::offers(&index, &state.catalog(), &state.app_version))
+}
+
+#[derive(Serialize)]
+struct InstallFailure {
+    id: String,
+    error: String,
+}
+
+#[derive(Serialize)]
+struct InstallReport {
+    installed: Vec<String>,
+    failed: Vec<InstallFailure>,
+}
+
+#[tauri::command]
+async fn install_labs(app: AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> CmdResult<InstallReport> {
+    claim_busy(&state)?;
+    let result = install_labs_inner(&app, &state, ids).await;
+    state.busy.store(false, Ordering::SeqCst);
+    result
+}
+
+async fn install_labs_inner(app: &AppHandle, state: &AppState, ids: Vec<String>) -> CmdResult<InstallReport> {
+    let index = packs::fetch_index(&index_url(), &signing_pubkey(app)?).await?;
+    let active_id = state.store.lock().unwrap().active.as_ref().map(|a| a.attempt.lab_id.clone());
+    let mut report = InstallReport { installed: vec![], failed: vec![] };
+    for id in ids {
+        let fail = |error: String| InstallFailure { id: id.clone(), error };
+        let Some(entry) = index.labs.iter().find(|e| e.id == id).cloned() else {
+            report.failed.push(fail("That lab isn't in the index.".into()));
+            continue;
+        };
+        if active_id.as_deref() == Some(id.as_str()) {
+            report.failed.push(fail("This lab is active. Destroy it before updating.".into()));
+            continue;
+        }
+        let outcome = match packs::fetch_pack(&entry).await {
+            Ok(data) => {
+                let (dir, ver) = (state.installed_dir.clone(), state.app_version.clone());
+                let e = entry.clone();
+                tauri::async_runtime::spawn_blocking(move || packs::install(&e, &data, &dir, &ver))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+            }
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(()) => report.installed.push(id),
+            Err(e) => report.failed.push(fail(e)),
+        }
+    }
+    if !report.installed.is_empty() {
+        state.reload_catalog();
+    }
+    Ok(report)
 }
 
 fn current(state: &AppState) -> CmdResult<(Lab, Difficulty)> {
@@ -528,8 +627,10 @@ fn submit_flag(state: State<AppState>, value: String) -> CmdResult<SubmitResult>
     let Store { profile, active } = &mut *store;
     let profile = profile.as_mut().ok_or("Create your profile first.")?;
     let active = active.as_mut().ok_or("No lab is active.")?;
-    let lab = &state.lab(&active.attempt.lab_id)?.manifest;
-    let all: Vec<&catalog::LabManifest> = state.catalog.labs.iter().map(|l| &l.manifest).collect();
+    let lab = state.lab(&active.attempt.lab_id)?;
+    let lab = &lab.manifest;
+    let catalog = state.catalog();
+    let all: Vec<&catalog::LabManifest> = catalog.labs.iter().map(|l| &l.manifest).collect();
     let result = progress::submit_flag(profile, &mut active.attempt, lab, &all, &value, now());
     state.save(&store);
     Ok(result)
@@ -554,7 +655,7 @@ fn get_map(state: State<AppState>, reveal: Option<u8>) -> CmdResult<MapView> {
     let mut store = state.store.lock().unwrap();
     let active = store.active.as_mut().ok_or("No lab is active.")?;
     let lab = state.lab(&active.attempt.lab_id)?;
-    let max = max_map_level(lab);
+    let max = max_map_level(&lab);
     if let Some(level) = reveal {
         active.attempt.map_level = active.attempt.map_level.max(level.min(max));
     }
@@ -614,7 +715,10 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&data_dir)?;
             let labs_dir = labs_dir(app.handle());
-            let catalog = Catalog::load(&labs_dir);
+            let installed_dir = data_dir.join("labs");
+            packs::clean_leftovers(&installed_dir);
+            let app_version = app.package_info().version.to_string();
+            let catalog = Catalog::load_roots(&labs_dir, &installed_dir, &app_version);
             let mut active: Option<ActiveLab> = read_json::<Option<ActiveLab>>(&data_dir.join("active.json")).flatten();
             // A start that was interrupted by closing the app can't be resumed mid-way.
             if let Some(a) = active.as_mut().filter(|a| a.phase == Phase::Starting) {
@@ -625,13 +729,15 @@ pub fn run() {
                 profile: read_json::<Option<Profile>>(&data_dir.join("profile.json")).flatten(),
                 active: active.filter(|a| catalog.get(&a.attempt.lab_id).is_some()),
             };
-            app.manage(AppState { catalog, labs_dir, data_dir, store: Mutex::new(store), busy: AtomicBool::new(false) });
+            app.manage(AppState { catalog: RwLock::new(Arc::new(catalog)), labs_dir, installed_dir, app_version, data_dir, store: Mutex::new(store), busy: AtomicBool::new(false) });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
             check_update,
             install_update,
+            check_lab_updates,
+            install_labs,
             get_profile,
             create_profile,
             run_preflight,
