@@ -7,3 +7,5 @@
 /license-server/dev-keys/
 /dist-pro/
 /dist-labs/
+__pycache__/
+*.pyc
